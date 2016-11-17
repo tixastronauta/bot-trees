@@ -1,3 +1,11 @@
+# Bot Trees (SMARKIO fork)
+This fork adds SMARKIO Integration:
+
+- Support for remote dialogs
+- Conversation reset when remote dialog is updated
+- SMARKIO lead integration custom type handler
+
+
 # Bot Trees
 This is a sample bot app that uses the [bot-graph-dialog](https://github.com/CatalystCode/bot-graph-dialog) extension for dynamically loading graph-based dialogs.
 Use this app as a reference for using the `bot-graph-dialog` extension.

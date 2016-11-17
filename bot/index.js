@@ -1,3 +1,4 @@
+var request = require('request');
 var path = require('path');
 var builder = require('botbuilder');
 var BotGraphDialog = require('bot-graph-dialog');
@@ -15,55 +16,84 @@ var connector = new builder.ChatConnector({
   });
   
 var bot = new builder.UniversalBot(connector);
-var intents = new builder.IntentDialog();     
+var intents = new builder.IntentDialog();
 
-module.exports = connector;
+// this flag will become true when the dialog is updated
+var isScenarioDirty = false;
 
-var scenariosPath = path.join(__dirname, 'scenarios');
+// middleware to intercept user messages
+// if dialog is dirty, we will reset the session
+bot.use({
+  botbuilder: function(session, next) {
+    if (isScenarioDirty) {
+      isScenarioDirty = false;
+      session.send("Dialog updated. We'll have to start over.");
+      session.reset("/");
+      return;
+    }
+    return next();
+  }
+});
+
+module.exports = {
+  connector,
+  loadDynamicScenario
+};
+
 var handlersPath = path.join(__dirname, 'handlers');
 
 bot.dialog('/', intents);
 
-intents.matches(/^(help|hi|hello)/i, [
-  function (session) {
-    session.send('Hi, how can I help you?');
+// first scenario to show: 197
+loadDynamicScenario(197, true);
+
+
+// dynamically load dialog from a remote datasource (SMARKIO chatbot JSON API)
+// create a GraphDialog and bind it to the intents object
+function loadDynamicScenario(scenario, isClean) {
+
+  var dialogPath = `/${scenario}`;
+  var re = new RegExp(".", 'i');
+  if (intents.handlers[re.toString()])
+  {
+    console.log(`deleting existing handler: ${re.toString()}`);
+    delete intents.handlers[re.toString()];
   }
-]);
 
-// dynamically load dialogs from external datasource
-// create a GraphDialog for each and bind it to the intents object
-loadDialogs()
-  .then(dialogs => {
-    for (var i=0; i<dialogs.length; i++) {
-  
-      ((dialog) => {
-        console.log(`loading scenario: ${dialog.scenario} for regex: ${dialog.regex}`);
-        
-        var dialogPath = `/${dialog.scenario}`;
-        var re = new RegExp(dialog.regex, 'i');
-        intents.matches(re, [
-          function (session) {
-            session.beginDialog(dialogPath, {});
-          }
-        ]);
-
-        GraphDialog
-          .fromScenario({ 
-            bot,
-            scenario: dialog.scenario, 
-            loadScenario, 
-            loadHandler,
-            customTypeHandlers: getCustomTypeHandlers()
-          })
-          .then(graphDialog => {
-            bot.dialog(dialogPath, graphDialog.getDialog());
-            console.log(`graph dialog loaded successfully: scenario ${dialog.scenario} for regExp: ${dialog.regex}`);
-          })
-          .catch(err => { console.error(`error loading dialog: ${err.message}`); });
-      })(dialogs[i]);
+  intents.matches(re, [
+    function (session) {
+      session.beginDialog(dialogPath, {});
     }
-  })
-  .catch(err => console.error(`error loading dialogs dynamically: ${err.message}`));
+  ]);
+
+  GraphDialog
+    .fromScenario({
+      bot,
+      scenario: scenario,
+      loadScenario: loadRemoteScenario,
+      loadHandler,
+      customTypeHandlers: getCustomTypeHandlers()
+    })
+    .then(graphDialog => {
+
+      if (bot.lib.dialogs[`/${scenario}`])
+      {
+        console.log(`deleting existing scenario ${scenario}`);
+        delete bot.lib.dialogs[`/${scenario}`];
+      }
+
+      bot.dialog(dialogPath, graphDialog.getDialog());
+
+      if ("undefined" == typeof isClean)
+      {
+        console.log(`marking scenario as dirty`);
+        isScenarioDirty = true;
+      }
+
+      console.log(`graph dialog loaded successfully: scenario ${scenario}`);
+    })
+    .catch(err => { console.error(`error loading dialog: ${err.message}`); });
+}
 
 // this allows you to extend the json with more custom node types, 
 // by providing your implementation to processing each custom type.
@@ -78,34 +108,46 @@ function getCustomTypeHandlers() {
         console.log(`in custom node type handler: customTypeStepDemo, data: ${data.someData}`);
         return next();
       }
+    },
+    {
+      name: "smarkioSubmit",
+      execute: (session, next, data) => {
+        var form = "undefined" != typeof data.postParameters ? data.postParameters : {};
+        for (var prop in session.dialogData) {
+          form[prop] = session.dialogData[prop];
+        }
+        var options = {
+          url: data.url,
+          form: form
+        };
+        request.post(options, function(error, response, body) {
+          console.log(error);
+          console.log(body);
+        });
+        return next();
+      }
     }
   ];
 }
 
-// this is the handler for loading scenarios from external datasource
-// in this implementation we're just reading it from a file
-// but it can come from any external datasource like a file, db, etc.
-function loadScenario(scenario) {
+
+// this handler loads remote scenarios from SMARKIO chatbot JSON API
+function loadRemoteScenario(scenario) {
   return new Promise((resolve, reject) => {
-    console.log('loading scenario', scenario);
-    // implement loadScenario from external datasource.
-    // in this example we're loading from local file
-    var scenarioPath = path.join(scenariosPath, scenario + '.json');
-    
-    return fs.readFile(scenarioPath, 'utf8', (err, content) => {
-      if (err) {
-        console.error("error loading json: " + scenarioPath);
-        return reject(err);
-      }
 
-      var scenarioObj = JSON.parse(content);
+    console.log(`loadRemoteScenario: ${scenario}`);
 
-      // simulating long load period
-      setTimeout(() => {
-        console.log('resolving scenario', scenarioPath);
-        resolve(scenarioObj);
-      }, Math.random() * 3000);
-    });  
+    var uri = `http://c44a5867.ngrok.io/index.php/chat/json/${scenario}`;
+    console.log(`loading remote scenario ${scenario} from ${uri}`);
+
+    request(uri, {}, function (error, response, body) {
+
+      console.log(`resolving remote scenario... `);
+      console.log(body);
+      resolve(JSON.parse(body));
+
+    });
+
   });
 }
 
@@ -134,29 +176,3 @@ function loadHandler(handler) {
     });  
   });
 }
-
-// this is the handler for loading scenarios from external datasource
-// in this implementation we're just reading it from the file scnearios/dialogs.json
-// but it can come from any external datasource like a file, db, etc.
-function loadDialogs() {
-  return new Promise((resolve, reject) => {
-    console.log('loading dialogs');
-
-    var dialogsPath = path.join(scenariosPath, "dialogs.json");
-    return fs.readFile(dialogsPath, 'utf8', (err, content) => {
-      if (err) {
-        console.error("error loading json: " + dialogsPath);
-        return reject(err);
-      }
-
-      var dialogs = JSON.parse(content);
-
-      // simulating long load period
-      setTimeout(() => {
-        console.log('resolving dialogs', dialogsPath);
-        resolve(dialogs.dialogs);
-      }, Math.random() * 3000);
-    });  
-  });
-}
-
